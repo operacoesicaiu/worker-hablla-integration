@@ -10,12 +10,13 @@ async function run() {
     try {
         const gHeaders = { 'Authorization': `Bearer ${GOOGLE_TOKEN}`, 'Content-Type': 'application/json' };
 
-        // 1. Sincroniza Colaboradores
-        const resDB = await axios.get(`https://sheets.googleapis.com/v4/spreadsheets/${DB_COLABORADOR_ID}/values/A:B`, { headers: gHeaders });
+        // 1. Sincroniza Colaboradores (Usando a lógica da Coluna 12/M da planilha de colaboradores)
+        console.log(`[${new Date().toISOString()}] Sincronizando base de colaboradores...`);
+        const resDB = await axios.get(`https://sheets.googleapis.com/v4/spreadsheets/${DB_COLABORADOR_ID}/values/Base_de_Colaboradores!A:M`, { headers: gHeaders });
         const mapaNomes = {};
         if (resDB.data?.values) {
-            resDB.data.values.forEach(row => {
-                if (row[1] && row[0]) mapaNomes[row[1]] = row[0];
+            resDB.data.values.forEach(row => { 
+                if (row[12]) mapaNomes[row[12]] = row[0]; 
             });
         }
 
@@ -31,7 +32,7 @@ async function run() {
         const dataHojeBR = `${dia}/${mes}/${ano}`;
 
         const ehCargaInicial = dataHojeBR === '19/03/2026';
-        console.log(`[INFO] Rodando no GitHub. Data BR: ${dataHojeBR}. Carga Inicial: ${ehCargaInicial}`);
+        console.log(`[INFO] Data BR: ${dataHojeBR}. Carga Inicial: ${ehCargaInicial}`);
 
         // Datas para controle de Cards
         const seteDiasAtras = new Date(agoraBR);
@@ -39,7 +40,7 @@ async function run() {
         const limiteCriacao = new Date(agoraBR);
         limiteCriacao.setDate(agoraBR.getDate() - 9); 
 
-        // 3. Busca de Cards (Com correção do ID)
+        // 3. Busca de Cards
         let page = 1;
         let continuarBuscando = true;
         while (continuarBuscando) {
@@ -50,6 +51,7 @@ async function run() {
             const cards = res.data.results || [];
             if (cards.length === 0) break;
 
+            // Trava de segurança para não varrer o histórico inteiro em dias comuns
             if (!ehCargaInicial) {
                 const temCriacaoNova = cards.some(c => new Date(c.created_at) >= limiteCriacao);
                 if (!temCriacaoNova && page > 2) break; 
@@ -61,12 +63,19 @@ async function run() {
                     const dtUp = new Date(card.updated_at);
                     const atualizadoEm = new Date(dtUp.getTime() - (3 * 3600000)).toLocaleString('pt-BR').replace(',', '');
                     
-                    // CORREÇÃO: Pega ID se for objeto (v3) ou string
+                    // --- IGUALANDO À LÓGICA DO SEU SEGUNDO SCRIPT ---
+                    // Se card.user for um objeto, pegamos o .id. Se for string, usamos a string.
                     const atendenteID = (card.user && typeof card.user === 'object') ? card.user.id : (card.user || "");
                     
                     return [
-                        atualizadoEm, card.created_at, card.id, card.name, card.status, card.list,
-                        atendenteID, mapaNomes[atendenteID] || "", 
+                        atualizadoEm, 
+                        card.created_at, 
+                        card.id, 
+                        card.name, 
+                        card.status, 
+                        card.list,
+                        atendenteID,               // Coluna G: Recebe o ID igual à Coluna M do outro script
+                        mapaNomes[atendenteID] || "", // Coluna H: Busca o nome usando esse ID
                         (card.tags || []).map(t => t.name).join(", "),
                         (card.custom_fields || []).filter(f => f.value).map(f => String(f.value)).join(" | ")
                     ];
@@ -86,12 +95,9 @@ async function run() {
         let dataInicioRelatorio, dataFimRelatorio;
 
         if (ehCargaInicial) {
-            // CARGA TOTAL 2026
-            console.log("!!! EXECUTANDO CARGA TOTAL DE ATENDENTES !!!");
             dataInicioRelatorio = "2026-01-01T00:00:00Z";
-            dataFimRelatorio = agoraBR.toISOString(); // Até o momento exato de agora
+            dataFimRelatorio = agoraBR.toISOString(); 
         } else {
-            // ROTINA DIÁRIA (Ontem)
             const ontem = new Date(agoraBR);
             ontem.setDate(agoraBR.getDate() - 1);
             dataInicioRelatorio = new Date(ontem.setHours(0,0,0,0)).toISOString();
@@ -105,12 +111,26 @@ async function run() {
 
         const rowsAt = (resAt.data.results || []).map(item => {
             const u = item.user || {}, s = item.sector || {}, c = item.connection || {};
+            const atendenteID_Relatorio = u.id || ""; // ID vindo do relatório summary
+            
             return [ 
                 new Date(dataFimRelatorio).toLocaleDateString('pt-BR'), 
-                HABLLA_WORKSPACE_ID, s.id || "", s.name || "", u.id || "", 
-                mapaNomes[u.id] || "", u.email || "", item.total_services || 0, 
-                item.tme || 0, item.tma || 0, c.id || "", c.name || "", c.type || "", 
-                item.total_csat || 0, item.total_csat_greater_4 || 0, item.csat || 0, item.total_fcr || 0 
+                HABLLA_WORKSPACE_ID, 
+                s.id || "", 
+                s.name || "", 
+                atendenteID_Relatorio, 
+                mapaNomes[atendenteID_Relatorio] || "", // Busca nome pelo ID do relatório
+                u.email || "", 
+                item.total_services || 0, 
+                item.tme || 0, 
+                item.tma || 0, 
+                c.id || "", 
+                c.name || "", 
+                c.type || "", 
+                item.total_csat || 0, 
+                item.total_csat_greater_4 || 0, 
+                item.csat || 0, 
+                item.total_fcr || 0 
             ];
         });
 
