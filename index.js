@@ -10,8 +10,7 @@ async function run() {
     try {
         const gHeaders = { 'Authorization': `Bearer ${GOOGLE_TOKEN}`, 'Content-Type': 'application/json' };
 
-        // 1. Sincroniza Colaboradores (Mapa de ID para Nome)
-        console.log(`[${new Date().toISOString()}] Lendo base de colaboradores...`);
+        // 1. Sincroniza Colaboradores
         const resDB = await axios.get(`https://sheets.googleapis.com/v4/spreadsheets/${DB_COLABORADOR_ID}/values/A:B`, { headers: gHeaders });
         const mapaNomes = {};
         if (resDB.data?.values) {
@@ -24,40 +23,23 @@ async function run() {
         const login = await axios.post('https://api.hablla.com/v1/authentication/login', { email: HABLLA_EMAIL, password: HABLLA_PASSWORD });
         const hHeaders = { 'Authorization': `Bearer ${login.data.accessToken}` };
 
-        // --- LÓGICA DE TRANSIÇÃO ---
-        const hoje = new Date();
-        const ehCargaInicial = hoje.toLocaleDateString('pt-BR') === '19/03/2026';
-        
-        // Datas para Cards
-        const seteDiasAtras = new Date();
-        seteDiasAtras.setDate(hoje.getDate() - 7);
-        const limiteCriacao = new Date();
-        limiteCriacao.setDate(hoje.getDate() - 9); 
+        // --- LÓGICA DE DATA PARA GITHUB ACTIONS (UTC-3) ---
+        const agoraBR = new Date(new Date().getTime() - (3 * 3600000));
+        const dia = String(agoraBR.getUTCDate()).padStart(2, '0');
+        const mes = String(agoraBR.getUTCMonth() + 1).padStart(2, '0');
+        const ano = agoraBR.getUTCFullYear();
+        const dataHojeBR = `${dia}/${mes}/${ano}`;
 
-        // 3. Limpeza da Planilha (Aba Cards)
-        if (!ehCargaInicial) {
-            console.log(`[${new Date().toISOString()}] Rotina: Limpando Cards dos últimos 7 dias...`);
-            const resCardsAtuais = await axios.get(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/Base%20Hablla%20Card!A:A`, { headers: gHeaders });
-            if (resCardsAtuais.data?.values) {
-                const indicesParaDeletar = resCardsAtuais.data.values
-                    .map((row, index) => {
-                        if (!row[0] || index === 0) return -1;
-                        const partes = row[0].split(' ')[0].split('/'); 
-                        const dataRow = new Date(`${partes[2]}-${partes[1]}-${partes[0]}T00:00:00Z`);
-                        return dataRow >= seteDiasAtras ? index : -1;
-                    })
-                    .filter(i => i !== -1);
+        const ehCargaInicial = dataHojeBR === '19/03/2026';
+        console.log(`[INFO] Rodando no GitHub. Data BR: ${dataHojeBR}. Carga Inicial: ${ehCargaInicial}`);
 
-                if (indicesParaDeletar.length > 0) {
-                    const requests = indicesParaDeletar.reverse().map(i => ({
-                        deleteDimension: { range: { sheetId: 0, dimension: "ROWS", startIndex: i, endIndex: i + 1 } }
-                    }));
-                    await axios.post(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}:batchUpdate`, { requests }, { headers: gHeaders });
-                }
-            }
-        }
+        // Datas para controle de Cards
+        const seteDiasAtras = new Date(agoraBR);
+        seteDiasAtras.setDate(agoraBR.getDate() - 7);
+        const limiteCriacao = new Date(agoraBR);
+        limiteCriacao.setDate(agoraBR.getDate() - 9); 
 
-        // 4. Busca de Cards
+        // 3. Busca de Cards (Com correção do ID)
         let page = 1;
         let continuarBuscando = true;
         while (continuarBuscando) {
@@ -79,18 +61,12 @@ async function run() {
                     const dtUp = new Date(card.updated_at);
                     const atualizadoEm = new Date(dtUp.getTime() - (3 * 3600000)).toLocaleString('pt-BR').replace(',', '');
                     
-                    // --- CORREÇÃO: EXTRAÇÃO DO ID DO ATENDENTE ---
+                    // CORREÇÃO: Pega ID se for objeto (v3) ou string
                     const atendenteID = (card.user && typeof card.user === 'object') ? card.user.id : (card.user || "");
                     
                     return [
-                        atualizadoEm, 
-                        card.created_at, 
-                        card.id, 
-                        card.name, 
-                        card.status, 
-                        card.list,
-                        atendenteID,               // Coluna G: Preenche o ID (Texto)
-                        mapaNomes[atendenteID] || "", // Coluna H: Busca o Nome no mapa
+                        atualizadoEm, card.created_at, card.id, card.name, card.status, card.list,
+                        atendenteID, mapaNomes[atendenteID] || "", 
                         (card.tags || []).map(t => t.name).join(", "),
                         (card.custom_fields || []).filter(f => f.value).map(f => String(f.value)).join(" | ")
                     ];
@@ -104,17 +80,20 @@ async function run() {
             await sleep(500);
         }
 
-        // 5. LÓGICA DE ATENDENTES
-        console.log(`[${new Date().toISOString()}] Iniciando processamento de Atendentes...`);
+        // 4. LÓGICA DE ATENDENTES (Base Atendente)
+        console.log(`[${new Date().toISOString()}] Processando Base Atendente...`);
         
         let dataInicioRelatorio, dataFimRelatorio;
 
         if (ehCargaInicial) {
+            // CARGA TOTAL 2026
+            console.log("!!! EXECUTANDO CARGA TOTAL DE ATENDENTES !!!");
             dataInicioRelatorio = "2026-01-01T00:00:00Z";
-            const ontem = new Date(); ontem.setDate(hoje.getDate() - 1);
-            dataFimRelatorio = new Date(ontem.setHours(23,59,59,999)).toISOString();
+            dataFimRelatorio = agoraBR.toISOString(); // Até o momento exato de agora
         } else {
-            const ontem = new Date(); ontem.setDate(hoje.getDate() - 1);
+            // ROTINA DIÁRIA (Ontem)
+            const ontem = new Date(agoraBR);
+            ontem.setDate(agoraBR.getDate() - 1);
             dataInicioRelatorio = new Date(ontem.setHours(0,0,0,0)).toISOString();
             dataFimRelatorio = new Date(ontem.setHours(23,59,59,999)).toISOString();
         }
@@ -126,41 +105,24 @@ async function run() {
 
         const rowsAt = (resAt.data.results || []).map(item => {
             const u = item.user || {}, s = item.sector || {}, c = item.connection || {};
-            const dataRef = new Date(dataFimRelatorio).toLocaleDateString('pt-BR');
-            
             return [ 
-                dataRef, 
-                HABLLA_WORKSPACE_ID, 
-                s.id || "", 
-                s.name || "", 
-                u.id || "", 
-                mapaNomes[u.id] || "", 
-                u.email || "", 
-                item.total_services || 0, 
-                item.tme || 0, 
-                item.tma || 0, 
-                c.id || "", 
-                c.name || "", 
-                c.type || "", 
-                item.total_csat || 0, 
-                item.total_csat_greater_4 || 0, 
-                item.csat || 0, 
-                item.total_fcr || 0 
+                new Date(dataFimRelatorio).toLocaleDateString('pt-BR'), 
+                HABLLA_WORKSPACE_ID, s.id || "", s.name || "", u.id || "", 
+                mapaNomes[u.id] || "", u.email || "", item.total_services || 0, 
+                item.tme || 0, item.tma || 0, c.id || "", c.name || "", c.type || "", 
+                item.total_csat || 0, item.total_csat_greater_4 || 0, item.csat || 0, item.total_fcr || 0 
             ];
         });
 
         if (rowsAt.length > 0) {
             await axios.post(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/Base%20Atendente!A:A:append?valueInputOption=USER_ENTERED`, 
             { values: rowsAt }, { headers: gHeaders });
-            console.log(`[OK] ${rowsAt.length} linhas de atendentes inseridas.`);
+            console.log(`[OK] Inseridas ${rowsAt.length} linhas de atendentes.`);
         }
 
-        console.log(`[${new Date().toISOString()}] Tudo pronto!`);
-
     } catch (err) {
-        console.error("ERRO NO PROCESSO:", err.response?.data || err.message);
+        console.error("ERRO:", err.response?.data || err.message);
         process.exit(1);
     }
 }
-
 run();
