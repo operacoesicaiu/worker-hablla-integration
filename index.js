@@ -62,7 +62,7 @@ async function run() {
         let continuarBuscando = true;
         while (continuarBuscando) {
             const res = await axios.get(`https://api.hablla.com/v3/workspaces/${HABLLA_WORKSPACE_ID}/cards`, {
-                params: { board: HABLLA_BOARD_ID, page, limit: 50, order: "-updated_at" }, 
+                params: { board: HABLLA_BOARD_ID, page, limit: 50, order: "updated_at" }, 
                 headers: hHeaders
             });
             const cards = res.data.results || [];
