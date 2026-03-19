@@ -1,5 +1,8 @@
 const axios = require('axios');
 
+// Função auxiliar para esperar (delay)
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function run() {
     const { 
         GOOGLE_TOKEN, 
@@ -14,7 +17,7 @@ async function run() {
     try {
         const gHeaders = { 'Authorization': `Bearer ${GOOGLE_TOKEN}`, 'Content-Type': 'application/json' };
 
-        // 1. Sincroniza nomes dos colaboradores (Busca na planilha de DB)
+        // 1. Sincroniza colaboradores
         console.log(`[${new Date().toISOString()}] Sincronizando base de colaboradores...`);
         const resDB = await axios.get(
             `https://sheets.googleapis.com/v4/spreadsheets/${DB_COLABORADOR_ID}/values/Base_de_Colaboradores!A:M`,
@@ -24,45 +27,36 @@ async function run() {
         const mapaNomes = {};
         if (resDB.data && resDB.data.values) {
             resDB.data.values.forEach(row => {
-                if (row[12]) mapaNomes[row[12]] = row[0]; // Mapeia ID Hablla -> Nome
+                if (row[12]) mapaNomes[row[12]] = row[0];
             });
-            console.log(`[${new Date().toISOString()}] ${Object.keys(mapaNomes).length} colaboradores mapeados.`);
         }
 
-        // 2. Login na API da Hablla
-        console.log(`[${new Date().toISOString()}] Autenticando na Hablla...`);
+        // 2. Login Hablla
         const login = await axios.post('https://api.hablla.com/v1/authentication/login', {
             email: HABLLA_EMAIL, password: HABLLA_PASSWORD
         });
         const hHeaders = { 'Authorization': `Bearer ${login.data.accessToken}` };
 
-        // --- LÓGICA DE DATAS (CARGA INICIAL HOJE VS DIÁRIO AMANHÃ) ---
-        const hojeData = new Date().toISOString().split('T')[0]; // Ex: 2026-03-19
+        // --- LÓGICA DE DATAS ---
+        const hojeData = new Date().toISOString().split('T')[0];
         let inicioBusca = new Date();
         
-        // Se for dia 19/03/2026, busca desde o início do ano até 18/03/2026
         if (hojeData === "2026-03-19") {
-            console.log("--- EXECUTANDO CARGA CONSOLIDADA (DE 01/01/2026 ATÉ ONTEM) ---");
+            console.log("--- EXECUTANDO CARGA CONSOLIDADA (DELAY ATIVADO PARA EVITAR 429) ---");
             inicioBusca = new Date("2026-01-01T00:00:00Z");
         } else {
-            // A partir de amanhã, pega apenas o dia anterior (00:00:00)
             inicioBusca.setDate(inicioBusca.getDate() - 1);
             inicioBusca.setHours(0, 0, 0, 0);
         }
 
-        // O limite final é sempre ontem às 23:59:59 (para não pegar dados incompletos de hoje)
         const fimBusca = new Date();
         fimBusca.setDate(fimBusca.getDate() - 1);
         fimBusca.setHours(23, 59, 59, 999);
 
         const dISOInicio = inicioBusca.toISOString();
         const dISOFim = fimBusca.toISOString();
-        const dRelatorio = inicioBusca.toLocaleDateString('pt-BR');
 
-        console.log(`[${new Date().toISOString()}] Intervalo: ${dISOInicio} até ${dISOFim}`);
-
-        // 3. Processa Cards (Envia para aba 'Base Hablla Card')
-        console.log(`[${new Date().toISOString()}] Buscando cards na Hablla...`);
+        // 3. Processa Cards
         let page = 1, totalPages = 1;
         while (page <= totalPages) {
             const res = await axios.get(`https://api.hablla.com/v3/workspaces/${HABLLA_WORKSPACE_ID}/cards`, {
@@ -82,7 +76,6 @@ async function run() {
 
             const rowsCards = (res.data.results || []).map(card => {
                 const fmt = (d) => d ? new Date(new Date(d).getTime() - (3 * 3600000)).toLocaleString('pt-BR') : "";
-                
                 let cf = ["", "", "", ""];
                 const ids = ["67b39131ee792966f3fba492", "67b608470787782ce7acafba", "67dc6a0a17925c23d8365708", "679120ec177ff6d2c7597156"];
                 (card.custom_fields || []).forEach(f => {
@@ -102,12 +95,15 @@ async function run() {
             if (rowsCards.length > 0) {
                 await axios.post(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/Base%20Hablla%20Card!A:A:append?valueInputOption=USER_ENTERED`, 
                 { values: rowsCards }, { headers: gHeaders });
+                
+                // --- PAUSA DE SEGURANÇA (1.5 segundos) ---
+                // Isso evita o erro 429 do Google Sheets durante a carga inicial
+                await sleep(1500); 
             }
             page++;
         }
 
-        // 4. Processa Atendentes (Relatório Consolidado de Ontem)
-        console.log(`[${new Date().toISOString()}] Gerando relatório de atendentes...`);
+        // 4. Processa Atendentes
         const resAt = await axios.get(`https://api.hablla.com/v1/workspaces/${HABLLA_WORKSPACE_ID}/reports/services/summary`, {
             params: { start_date: dISOInicio, end_date: dISOFim },
             headers: hHeaders
@@ -116,7 +112,7 @@ async function run() {
         const rowsAt = (resAt.data.results || []).map(item => {
             const u = item.user || {}, s = item.sector || {}, c = item.connection || {};
             return [
-                dRelatorio, HABLLA_WORKSPACE_ID, s.id, s.name, u.id, 
+                inicioBusca.toLocaleDateString('pt-BR'), HABLLA_WORKSPACE_ID, s.id, s.name, u.id, 
                 mapaNomes[u.id] || "", u.email, item.total_services, 
                 item.tme, item.tma, c.id, c.name, c.type,
                 item.total_csat, item.total_csat_greater_4, item.csat, item.total_fcr
@@ -131,12 +127,8 @@ async function run() {
 
     } catch (e) {
         console.error("--- ERRO DETALHADO PARA QA ---");
-        if (e.response) {
-            console.error("Status da API:", e.response.status);
-            console.error("Detalhes:", JSON.stringify(e.response.data, null, 2));
-        } else {
-            console.error("Mensagem de erro:", e.message);
-        }
+        if (e.response) console.error(JSON.stringify(e.response.data, null, 2));
+        else console.error(e.message);
         process.exit(1);
     }
 }
