@@ -57,7 +57,7 @@ async function run() {
             }
         }
 
-        // 4. Busca de Cards (Mesma lógica anterior)
+        // 4. Busca de Cards
         let page = 1;
         let continuarBuscando = true;
         while (continuarBuscando) {
@@ -78,10 +78,19 @@ async function run() {
                 .map(card => {
                     const dtUp = new Date(card.updated_at);
                     const atualizadoEm = new Date(dtUp.getTime() - (3 * 3600000)).toLocaleString('pt-BR').replace(',', '');
-                    const atendenteID = card.user || "";
+                    
+                    // --- CORREÇÃO: EXTRAÇÃO DO ID DO ATENDENTE ---
+                    const atendenteID = (card.user && typeof card.user === 'object') ? card.user.id : (card.user || "");
+                    
                     return [
-                        atualizadoEm, card.created_at, card.id, card.name, card.status, card.list,
-                        atendenteID, mapaNomes[atendenteID] || "", 
+                        atualizadoEm, 
+                        card.created_at, 
+                        card.id, 
+                        card.name, 
+                        card.status, 
+                        card.list,
+                        atendenteID,               // Coluna G: Preenche o ID (Texto)
+                        mapaNomes[atendenteID] || "", // Coluna H: Busca o Nome no mapa
                         (card.tags || []).map(t => t.name).join(", "),
                         (card.custom_fields || []).filter(f => f.value).map(f => String(f.value)).join(" | ")
                     ];
@@ -95,18 +104,16 @@ async function run() {
             await sleep(500);
         }
 
-        // 5. LÓGICA DE ATENDENTES (Relatório Summary)
+        // 5. LÓGICA DE ATENDENTES
         console.log(`[${new Date().toISOString()}] Iniciando processamento de Atendentes...`);
         
         let dataInicioRelatorio, dataFimRelatorio;
 
         if (ehCargaInicial) {
-            // Carga de 2026 até ontem
             dataInicioRelatorio = "2026-01-01T00:00:00Z";
             const ontem = new Date(); ontem.setDate(hoje.getDate() - 1);
             dataFimRelatorio = new Date(ontem.setHours(23,59,59,999)).toISOString();
         } else {
-            // Rotina: Apenas Ontem
             const ontem = new Date(); ontem.setDate(hoje.getDate() - 1);
             dataInicioRelatorio = new Date(ontem.setHours(0,0,0,0)).toISOString();
             dataFimRelatorio = new Date(ontem.setHours(23,59,59,999)).toISOString();
@@ -119,7 +126,6 @@ async function run() {
 
         const rowsAt = (resAt.data.results || []).map(item => {
             const u = item.user || {}, s = item.sector || {}, c = item.connection || {};
-            // Se for carga inicial, usamos a data do fim do período como referência, na rotina usamos 'ontem'
             const dataRef = new Date(dataFimRelatorio).toLocaleDateString('pt-BR');
             
             return [ 
@@ -128,7 +134,7 @@ async function run() {
                 s.id || "", 
                 s.name || "", 
                 u.id || "", 
-                mapaNomes[u.id] || "", // Nome da planilha de colaboradores
+                mapaNomes[u.id] || "", 
                 u.email || "", 
                 item.total_services || 0, 
                 item.tme || 0, 
