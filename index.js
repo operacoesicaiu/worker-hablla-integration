@@ -1,45 +1,50 @@
 const axios = require('axios');
 
 async function run() {
-    const googleToken = process.env.GOOGLE_TOKEN;
-    const habllaEmail = process.env.HABLLA_EMAIL;
-    const habllaPassword = process.env.HABLLA_PASSWORD;
-    const workspaceId = process.env.HABLLA_WORKSPACE_ID;
-    const spreadsheetId = process.env.SPREADSHEET_ID;
-    const boardId = process.env.HABLLA_BOARD_ID;
+    const { 
+        GOOGLE_TOKEN, 
+        HABLLA_EMAIL, 
+        HABLLA_PASSWORD, 
+        HABLLA_WORKSPACE_ID, 
+        HABLLA_BOARD_ID, 
+        SPREADSHEET_ID,
+        DB_COLABORADOR_ID 
+    } = process.env;
 
     try {
-        console.log(`[${new Date().toISOString()}] Iniciando Processamento Hablla...`);
+        const gHeaders = { 'Authorization': `Bearer ${GOOGLE_TOKEN}`, 'Content-Type': 'application/json' };
 
-        // 1. Autenticação Hablla
-        const loginRes = await axios.post('https://api.hablla.com/v1/authentication/login', {
-            email: habllaEmail,
-            password: habllaPassword
+        console.log(`[${new Date().toISOString()}] Sincronizando base de colaboradores...`);
+        const resDB = await axios.get(
+            `https://sheets.googleapis.com/v4/spreadsheets/${DB_COLABORADOR_ID}/values/Base_de_Colaboradores!A:M`,
+            { headers: gHeaders }
+        );
+        
+        const mapaNomes = {};
+        (resDB.data.values || []).forEach(row => {
+            const nome = row[0];   // Coluna A
+            const idHablla = row[12]; // Coluna M
+            if (idHablla) mapaNomes[idHablla] = nome;
         });
-        const habllaToken = loginRes.data.accessToken;
-        const habllaHeaders = { 'Authorization': `Bearer ${habllaToken}` };
-        const googleHeaders = { 
-            'Authorization': `Bearer ${googleToken}`,
-            'Content-Type': 'application/json'
-        };
 
-        // --- FLUXO 1: CARDS (COM PAGINAÇÃO) ---
-        console.log(`[${new Date().toISOString()}] Processando Cards...`);
-        let currentPage = 1;
-        let totalPages = 1;
+        // 2. Login Hablla
+        const login = await axios.post('https://api.hablla.com/v1/authentication/login', {
+            email: HABLLA_EMAIL, password: HABLLA_PASSWORD
+        });
+        const hHeaders = { 'Authorization': `Bearer ${login.data.accessToken}` };
 
-        while (currentPage <= totalPages) {
-            const res = await axios.get(`https://api.hablla.com/v3/workspaces/${workspaceId}/cards`, {
-                params: { board: boardId, limit: 50, order: 'updated_at', page: currentPage },
-                headers: habllaHeaders
+        // 3. Processa Cards (Fluxo 1)
+        let page = 1, totalPages = 1;
+        while (page <= totalPages) {
+            const res = await axios.get(`https://api.hablla.com/v3/workspaces/${HABLLA_WORKSPACE_ID}/cards`, {
+                params: { board: HABLLA_BOARD_ID, limit: 50, order: 'updated_at', page: page },
+                headers: hHeaders
             });
 
             totalPages = res.data.totalPages;
-            const cards = res.data.results || [];
-            const rowsCards = cards.map(card => {
-                const formatDate = (d) => d ? new Date(new Date(d).getTime() - (3 * 3600000)).toLocaleString('pt-BR') : "";
+            const rowsCards = (res.data.results || []).map(card => {
+                const fmt = (d) => d ? new Date(new Date(d).getTime() - (3 * 3600000)).toLocaleString('pt-BR') : "";
                 
-                // Mapeamento de Custom Fields (IDs Fixos conforme seu código original)
                 let cf1 = "", cf2 = "", cf3 = "", cf4 = "";
                 (card.custom_fields || []).forEach(cf => {
                     if (cf.custom_field === "67b39131ee792966f3fba492") cf1 = cf.value;
@@ -48,55 +53,51 @@ async function run() {
                     else if (cf.custom_field === "679120ec177ff6d2c7597156") cf4 = cf.value;
                 });
 
-                const tags = (card.tags || []).map(t => t.name).join(", ");
-
                 return [
-                    formatDate(card.updated_at), formatDate(card.created_at), card.workspace, card.board,
-                    card.list, cf1, cf2, cf3, card.name, card.description, card.source, card.status,
-                    card.user, formatDate(card.finished_at), card.id, "", cf4, tags
+                    fmt(card.updated_at), fmt(card.created_at), card.workspace, card.board, card.list,
+                    cf1, cf2, cf3, card.name, card.description, card.source, card.status,
+                    card.user, fmt(card.finished_at), card.id, 
+                    mapaNomes[card.user] || "", // Nome resolvido aqui!
+                    cf4, (card.tags || []).map(t => t.name).join(", ")
                 ];
             });
 
             if (rowsCards.length > 0) {
-                await axios.post(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Base%20Hablla%20Card%20-%20Pendente!A:A:append?valueInputOption=USER_ENTERED`, 
-                { values: rowsCards }, { headers: googleHeaders });
+                await axios.post(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/Base%20Hablla%20Card%20-%20Pendente!A:A:append?valueInputOption=USER_ENTERED`, 
+                { values: rowsCards }, { headers: gHeaders });
             }
-            currentPage++;
+            page++;
         }
 
-        // --- FLUXO 2: ATENDENTES (ONTEM) ---
-        console.log(`[${new Date().toISOString()}] Processando Atendentes...`);
-        const ontem = new Date();
-        ontem.setDate(ontem.getDate() - 1);
-        const dateStr = ontem.toISOString().split('T')[0];
+        // 4. Processa Atendentes (Fluxo 2)
+        const ontem = new Date(); ontem.setDate(ontem.getDate() - 1);
+        const dRel = ontem.toLocaleDateString('pt-BR');
+        const dISO = ontem.toISOString().split('T')[0];
 
-        const resAtendentes = await axios.get(`https://api.hablla.com/v1/workspaces/${workspaceId}/reports/services/summary`, {
-            params: { start_date: `${dateStr}T00:00:00Z`, end_date: `${dateStr}T23:59:59Z` },
-            headers: habllaHeaders
+        const resAt = await axios.get(`https://api.hablla.com/v1/workspaces/${HABLLA_WORKSPACE_ID}/reports/services/summary`, {
+            params: { start_date: `${dISO}T00:00:00Z`, end_date: `${dISO}T23:59:59Z` },
+            headers: hHeaders
         });
 
-        const rowsAtendentes = (resAtendentes.data.results || []).map(item => {
-            const user = item.user || {};
-            const sector = item.sector || {};
-            const conn = item.connection || {};
+        const rowsAt = (resAt.data.results || []).map(item => {
+            const u = item.user || {}, s = item.sector || {}, c = item.connection || {};
             return [
-                ontem.toLocaleDateString('pt-BR'), workspaceId, sector.id, sector.name,
-                user.id, "", user.email, item.total_services, item.tme, item.tma,
-                conn.id, conn.name, conn.type, item.total_csat, item.total_csat_greater_4,
-                item.csat, item.total_fcr
+                dRel, HABLLA_WORKSPACE_ID, s.id, s.name, u.id, 
+                mapaNomes[u.id] || "",
+                u.email, item.total_services, item.tme, item.tma, c.id, c.name, c.type,
+                item.total_csat, item.total_csat_greater_4, item.csat, item.total_fcr
             ];
         });
 
-        if (rowsAtendentes.length > 0) {
-            await axios.post(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Base%20Atendente!A:A:append?valueInputOption=USER_ENTERED`, 
-            { values: rowsAtendentes }, { headers: googleHeaders });
+        if (rowsAt.length > 0) {
+            await axios.post(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/Base%20Atendente!A:A:append?valueInputOption=USER_ENTERED`, 
+            { values: rowsAt }, { headers: gHeaders });
         }
+        console.log(`[${new Date().toISOString()}] Processamento concluído.`);
 
-        console.log(`[${new Date().toISOString()}] Sucesso Total.`);
-    } catch (err) {
-        console.error(`[${new Date().toISOString()}] Erro na execução.`);
+    } catch (e) {
+        console.error("Erro na integração.");
         process.exit(1);
     }
 }
-
 run();
