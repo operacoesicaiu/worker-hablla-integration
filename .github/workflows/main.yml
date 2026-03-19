@@ -24,4 +24,5 @@ jobs:
           HABLLA_WORKSPACE_ID: ${{ secrets.HABLLA_WORKSPACE_ID }}
           HABLLA_BOARD_ID: ${{ secrets.HABLLA_BOARD_ID }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          DB_COLABORADOR_ID: ${{ secrets.DB_COLABORADOR_ID }}
         run: node index.js
